@@ -11,6 +11,8 @@ from llm.agents.stock_agent import stock_agent
 from llm.agents.news_agent import news_agent
 from llm.agents.human_review_agent import human_review_agent
 from llm.agents.rag_agent import rag_agent
+from llm.agents.portfolio_agent import portfolio_agent
+from llm.agents.technical_agent import technical_agent
 
 from llm.ingestion.local_index import build_or_update_index
 
@@ -43,6 +45,8 @@ async def lifespan(app: FastAPI):
     builder.add_node("stock_agent", stock_agent)
     builder.add_node("news_agent", news_agent)
     builder.add_node("human_review_agent", human_review_agent)
+    builder.add_node("technical_agent", technical_agent)
+    builder.add_node("portfolio_agent", portfolio_agent)
     builder.add_node("rag_agent", rag_agent)
     builder.add_edge(START, "supervisor")
     builder.add_edge("human_review_agent", END)

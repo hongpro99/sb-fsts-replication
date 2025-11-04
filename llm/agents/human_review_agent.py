@@ -1,11 +1,17 @@
 from typing import Dict, Any
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from langgraph.graph import END
 
 def human_review_agent(state: Dict[str, Any]) -> Command:
     """
-    API 환경에서는 보통 클라이언트 UI에서 승인/수정 입력을 받아
-    resume(...)로 이어갑니다. 데모로는 승인된 것으로 처리.
+    Human-in-the-loop 노드:
+    - 그래프 실행을 일시 중단(interrupt)
+    - 사용자의 피드백 입력을 기다린 후 /resume으로 재개됨
     """
-    feedback = state.get("human_feedback", "Approved ✅")
+    if "human_feedback" not in state:
+        # 처음 진입 시: 사용자 입력을 기다림
+        return interrupt("Awaiting human feedback 📝")
+
+    # /resume()으로 전달된 피드백이 있으면 반영 후 종료
+    feedback = state["human_feedback"]
     return Command(update={"human_feedback": feedback}, goto=END)
