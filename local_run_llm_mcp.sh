@@ -1,0 +1,1 @@
+python -m llm.mcp_servers.stock_mcp_server --port 8005

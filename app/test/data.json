@@ -1,0 +1,23 @@
+{
+  "user_id": "id1",
+  "start_date": "2023-01-01",
+  "end_date": "2025-06-14",
+  "target_trade_value_krw": 1000000,
+  "selected_stocks": ["대한항공", "아모레퍼시픽"],
+  "selected_symbols": {
+    "대한항공": "003490",
+    "아모레퍼시픽": "090430"
+  },
+  "interval": "day",
+  "buy_trading_logic": ["rsi_trading"],
+  "sell_trading_logic": [],
+  "buy_condition_yn": false,
+  "initial_capital": 10000000.0,
+  "rsi_buy_threshold": 35,
+  "rsi_sell_threshold": 70,
+  "rsi_period": 25,
+  "use_take_profit": true,
+  "take_profit_ratio": 5.0,
+  "use_stop_loss": true,
+  "stop_loss_ratio": 5.0
+}

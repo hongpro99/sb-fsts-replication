@@ -1,0 +1,26 @@
+# 베이스 이미지 설정 (Python 3.11 사용)
+FROM python:3.13-alpine
+
+# Node.js 및 npm, npx 설치
+RUN apt-get update && \
+    apt-get install -y curl gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs
+    
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# 필요한 패키지 설치
+COPY requirements_llm.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 애플리케이션 코드 복사
+# 프로젝트 depth 일치 시키도록 /app/app 설정
+COPY ./llm /app/llm
+# COPY ./dashboard_web/trading_logic.json /app/app/trading_logic.json
+COPY .env /app/.env
+
+EXPOSE 7002
+
+# FastAPI 서버 실행 (Uvicorn 사용)
+CMD ["uvicorn", "llm.api_server:app", "--host", "0.0.0.0", "--port", "7002"]

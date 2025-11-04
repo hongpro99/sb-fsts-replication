@@ -1,0 +1,25 @@
+# 베이스 이미지 설정 (Python 3.11 사용)
+FROM python:3.13-alpine
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# 필요한 패키지 설치
+COPY requirements_web.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 애플리케이션 코드 복사
+# 프로젝트 depth 일치 시키도록 /app/app 설정
+COPY ./app /app/app
+COPY ./dashboard_web /app/dashboard_web
+# ✅ CSV 파일도 함께 복사
+COPY ./profits_history.csv /app/profits_history.csv
+COPY .env.dev /app/.env.dev
+
+EXPOSE 8500
+
+# 환경 변수 설정
+ENV STREAMLIT_THEME_BASE="dark"
+
+# streamlit 서버 실행
+CMD ["streamlit", "run", "dashboard_web/main.py", "--server.port", "8500"]

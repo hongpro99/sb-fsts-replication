@@ -1,0 +1,20 @@
+{
+    "python.testing.pytestArgs": [
+        "tests",
+        "-s"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestArgs": [
+        "-v",
+        "-s",
+        "./tests",
+        "-p",
+        "test_*.py"
+    ],
+    // root 를 모듈 경로로 설정
+    "python.envFile": "${workspaceFolder}/.env",
+
+    // ✅ 가상환경 Python 경로 설정
+    "python.defaultInterpreterPath": "${workspaceFolder}/fsts_venv/Scripts/python.exe"
+}
