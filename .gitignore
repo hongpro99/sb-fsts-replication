@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.env.dev
+.env.local
+secret.json
+token.json
+virtual_secret.json
+local_experiment/test.ipynb
+local_experiment/stock.ipynb
+local_experiment/database.ipynb
+app/utils/trading_logic.py
+app/legacy/trading_logics.py
+dashboard_web/trading_logic.json
