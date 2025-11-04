@@ -3,18 +3,21 @@ from datetime import datetime
 import pytz, re, feedparser, json, os
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
+import pandas as pd
 import argparse
 
 from app.utils.dynamodb.model.user_info_model import UserInfo
 from app.utils.dynamodb.model.stock_symbol_model import StockSymbol
 from app.utils.dynamodb.model.auto_trading_balance_model import AutoTradingBalance
-
+from app.utils.technical_indicator import TechnicalIndicator
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, default=int(os.getenv("MCP_PORT", "8005")), help="Port number for MCP server")
 args = parser.parse_args()
 
 mcp = FastMCP("stock-server", port=args.port)
+
+indicator = TechnicalIndicator()
 
 @mcp.tool()
 async def get_current_time() -> str:
@@ -83,6 +86,63 @@ async def get_auto_trading_balance(trading_bot_name: str, symbol: str) -> str:
         return f"❌ No balance found for bot={trading_bot_name}, symbol={symbol}"
     except Exception as e:
         return f"⚠️ Error fetching trading balance: {e}"
+    
+@mcp.tool()
+def get_indicator(indicator_type: str, data: list, period: int | None = None) -> str:
+    """
+    📊 OHLC 데이터에 대해 지정된 보조지표를 계산하여 반환합니다.
+    - indicator_type: 보조지표 이름 (rsi, macd, mfi, bollinger, stochastic, ema, sma, wma)
+    - data: OHLC 딕셔너리 리스트 (예: [{"Open":..., "High":..., "Low":..., "Close":..., "Volume":...}, ...])
+    - period: 일부 지표의 계산 기간 (선택)
+    """
+    try:
+        df = pd.DataFrame(data)
+
+        if "Close" not in df.columns:
+            return "❌ 데이터에 'Close' 컬럼이 필요합니다."
+
+        if indicator_type == "rsi":
+            df = indicator.cal_rsi_df(df, period or 25)
+            result = df[["Close", "rsi"]].dropna().tail(5).to_dict(orient="records")
+
+        elif indicator_type == "macd":
+            df = indicator.cal_macd_df(df)
+            result = df[["Close", "macd", "macd_signal", "macd_histogram"]].dropna().tail(5).to_dict(orient="records")
+
+        elif indicator_type == "mfi":
+            df = indicator.cal_mfi_df(df)
+            result = df[["Close", "mfi"]].dropna().tail(5).to_dict(orient="records")
+
+        elif indicator_type == "bollinger":
+            df = indicator.cal_bollinger_band(df, window=period or 20)
+            result = df[["Close", "BB_Upper", "BB_Middle", "BB_Lower"]].dropna().tail(5).to_dict(orient="records")
+
+        elif indicator_type == "stochastic":
+            df = indicator.cal_stochastic_df(df)
+            result = df[["Close", "stochastic_k", "stochastic_d"]].dropna().tail(5).to_dict(orient="records")
+
+        elif indicator_type == "ema":
+            df = indicator.cal_ema_df(df, period or 20)
+            col = f"EMA_{period or 20}"
+            result = df[["Close", col]].dropna().tail(5).to_dict(orient="records")
+
+        elif indicator_type == "sma":
+            df = indicator.cal_sma_df(df, period or 20)
+            col = f"SMA_{period or 20}"
+            result = df[["Close", col]].dropna().tail(5).to_dict(orient="records")
+
+        elif indicator_type == "wma":
+            df = indicator.cal_wma_df(df, period or 20)
+            col = f"WMA_{period or 20}"
+            result = df[["Close", col]].dropna().tail(5).to_dict(orient="records")
+
+        else:
+            return f"⚠️ 지원되지 않는 지표 유형입니다: {indicator_type}"
+
+        return f"[{indicator_type.upper()} 결과]\n{result}"
+
+    except Exception as e:
+        return f"⚠️ 보조지표 계산 중 오류 발생: {e}"
 
     
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ def rag_agent(state: dict):
     vs = _get_vectorstore()
         
     docs = vs.similarity_search(q, k=8)
+    
     if not docs:
         answer = "관련 문서를 찾을 수 없습니다."
     else:
