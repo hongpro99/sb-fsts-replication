@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import redis
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.redis import RedisSaver
+from langgraph.types import Command
 
 from llm.agents.supervisor_agent import supervisor_agent
 from llm.agents.stock_agent import stock_agent
@@ -25,8 +26,8 @@ from typing import TypedDict, Literal
 class AppState(TypedDict, total=False):
     input: str
     task: str
-    response: str
-    handled_by: str
+    response: str #현재 출력 메시지
+    handled_by: str #어떤 agent가 응답을 처리했는지
     human_feedback: str
     require_human: bool
 
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
     builder.add_node("portfolio_agent", portfolio_agent)
     builder.add_node("rag_agent", rag_agent)
     builder.add_node("time_agent", time_agent)
+    
     builder.add_edge(START, "supervisor")
     builder.add_edge("human_review_agent", END)
     #redis_client = redis.Redis(host="127.0.0.1", port=6379, db=0)
@@ -64,21 +66,44 @@ app = FastAPI(title="Stock AI Graph (lifespan)", lifespan=lifespan)
 # 요청 모델
 # -----------------------------
 class ChatRequest(BaseModel):
-    session_id: str
-    text: str
-    require_human: bool = False
+    session_id: str #LangGraph 세션 ID (thread_id와 동일)
+    text: str #
+    require_human: bool = False #human 검토가 필요한지
 
 class ResumeRequest(BaseModel):
     session_id: str
-    human_feedback: str
+    human_feedback: str #사용자가 이전에 입력한 피드백
 
 # -----------------------------
 # 1️⃣ /agent_chat — 그래프 시작
 # -----------------------------
 @app.post("/agent_chat")
 def agent_chat(req: ChatRequest):
+    print("\n🔄 /agent_chat 호출됨")
+    print(f"📨 요청: session_id={req.session_id}, input: {req.text}, require_human: {req.require_human}")
+    
     init_state = {"input": req.text, "require_human": req.require_human}
-    result = app.state.graph.invoke(init_state, config={"thread_id": req.session_id})
+    config = {"configurable": {"thread_id": req.session_id}}
+    result = app.state.graph.invoke(init_state, config=config)
+    print(f"📦 LangGraph result: {result}")
+    
+    # interrupt 발생 시 메시지 포함 응답
+    if "__interrupt__" in result:
+        interrupt_list = result["__interrupt__"]
+        interrupt_msg = None
+        if isinstance(interrupt_list, list) and len(interrupt_list) > 0:
+            # Interrupt 객체의 value 속성 추출
+            interrupt_obj = interrupt_list[0]
+            interrupt_msg = getattr(interrupt_obj, "value", str(interrupt_obj))
+        return {
+            "session_id": req.session_id,
+            "handled_by": result.get("handled_by", "supervisor_agent"),
+            "response": interrupt_msg or "⚠️ 인간 피드백이 필요합니다.", #interrupt가 value를 키워드로 가짐
+            "require_human": True,
+            "human_feedback": None
+        }
+
+    # 일반적인 경우
     return {
         "session_id": req.session_id,
         "handled_by": result.get("handled_by"),
@@ -92,17 +117,42 @@ def agent_chat(req: ChatRequest):
 # -----------------------------
 @app.post("/resume")
 def resume(req: ResumeRequest):
-    """
-    Human-in-the-loop 재개 엔드포인트.
-    LangGraph 체크포인트에서 이어서 실행.
-    """
-    result = app.state.graph.resume(
-        {"human_feedback": req.human_feedback},
-        config={"thread_id": req.session_id}
-    )
-    return {
-        "session_id": req.session_id,
-        "response": result.get("response"),
-        "human_feedback": result.get("human_feedback"),
-        "handled_by": result.get("handled_by")
-    }
+    print("\n🔄 /resume 호출됨")
+    print(f"📨 요청: session_id={req.session_id}, feedback={req.human_feedback!r}")
+    config = {"configurable": {"thread_id": req.session_id}}
+    
+    try:
+        # ✅ 공식문서 방식: Command(resume=True)
+        result = app.state.graph.invoke(Command(resume=True), config=config)
+        print(f"📦 resume 결과: {result}")
+
+        # resume 후에도 interrupt 발생 가능 (예: human_review_agent)
+        if "__interrupt__" in result:
+            interrupt_list = result["__interrupt__"]
+            interrupt_msg = None
+            if isinstance(interrupt_list, list) and interrupt_list:
+                interrupt_obj = interrupt_list[0]
+                interrupt_msg = getattr(interrupt_obj, "value", str(interrupt_obj))
+
+            print(f"⏸ resume 중 interrupt 발생 → {interrupt_msg}")
+            return {
+                "session_id": req.session_id,
+                "handled_by": result.get("handled_by", "unknown"),
+                "response": interrupt_msg or "⚠️ 인간 피드백이 필요합니다.",
+                "require_human": True,
+                "human_feedback": req.human_feedback
+            }
+
+        print("✅ resume 정상 완료")
+        return {
+            "session_id": req.session_id,
+            "response": result.get("response"),
+            "human_feedback": result.get("human_feedback"),
+            "handled_by": result.get("handled_by")
+        }
+
+    except Exception as e:
+        import traceback
+        print("❌ resume 실행 중 예외 발생!")
+        traceback.print_exc()
+        return {"session_id": req.session_id, "error": str(e)}

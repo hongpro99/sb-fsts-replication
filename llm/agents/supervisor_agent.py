@@ -1,9 +1,10 @@
 from typing import Dict, Any, Literal
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 import os
+from langgraph.graph import END
 
 load_dotenv()
 
@@ -61,9 +62,15 @@ prompt = ChatPromptTemplate.from_template(
 )
 
 def supervisor_agent(state: Dict[str, Any]) -> Command[Literal["stock_agent", "news_agent", "rag_agent", "technical_agent", "portfolio_agent", "time_agent"]]:
-    msg = prompt.format_messages(input = state['input'])
-    decision = llm.invoke(msg).content.strip().lower()
     
+    """Supervisor Agent - LLM이 분기 결정하고, 사람 승인(interrupt) 후 다음 agent로 이동"""
+    print("\n📘 [supervisor_agent] 호출됨")
+    print(f"📤 입력 state: {state}")
+    
+    msg = prompt.format_messages(input = state['input']) # 템플릿 안 input이라는 변수를 값을 채워서 llm이 읽을 수 있는 구조로 만듬
+    decision = llm.invoke(msg).content.strip().lower() #msg를 llm으로 보낸 후 응답에서 실제 텍스트만 추출
+    
+    # 결정된 결과에 따라 goto 지정
     if "stock" in decision:
         goto = "stock_agent"
     elif "news" in decision:
@@ -79,7 +86,43 @@ def supervisor_agent(state: Dict[str, Any]) -> Command[Literal["stock_agent", "n
     else:
         # fallback 기본값: portfolio_agent → rag_agent 보조 호출 가능
         goto = "portfolio_agent"
-        
-    # require_human 플래그를 상태에 같이 내려보냄 (API에서 제어)
-    return Command(update={"task": state["input"], "require_human": state.get("require_human", False)}, goto=goto)    
+
+    # 🔹 1단계: 사람 승인 interrupt 발생 (여기서 실행 중단)
+    if "human_feedback" not in state:
+        return interrupt(
+            f"🧭 Supervisor 판단: '{goto}' 에이전트로 작업을 전달하려고 합니다.\n"
+            f"질문: {state['input']}\n"
+            "이 결정이 맞다면 '승인', 수정하려면 '거절'을 입력해주세요."
+        )
+
+    # 4️⃣ 승인 결과에 따라 분기 (resume 이후)
+    # interrupt로 중단된 뒤, /resume 요청 시 state에 human_feedback이 들어옵니다.
+    feedback = state.get("human_feedback", "").strip().lower() if "human_feedback" in state else ""
+    print(f"✅ human_feedback 수신됨: {feedback}")
+    
+    # 승인된 경우 → 선택된 agent로 이동
+    if feedback in ["승인", "approve", "ok", "yes"]:
+        update = {
+            "task": state["input"],
+            "require_human": False,
+            "handled_by": "supervisor_agent",
+            "approval": feedback,
+        }
+        print(f"➡ 승인됨 → 다음 agent로 이동: {goto}")
+        return Command(update=update, goto=goto)
+    
+    # 거절된 경우 → 종료
+    elif feedback in ["거절", "no", "reject", "취소"]:
+        update = {
+            "handled_by": "supervisor_agent",
+            "response": "❌ 사람이 판단을 거절했습니다. 그래프를 종료합니다.",
+            "approval": feedback,
+        }
+        print("🚫 거절됨 → 그래프 종료")
+        return Command(update=update, goto=END)
+    
+    print("⚠️ human_feedback이 유효하지 않음 → 그대로 종료")
+    return Command(update={"handled_by": "supervisor_agent"}, goto=END)
+                    
+    
     
