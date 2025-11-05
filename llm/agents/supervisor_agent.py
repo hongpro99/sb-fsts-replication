@@ -19,7 +19,7 @@ prompt = ChatPromptTemplate.from_template(
     """
     당신은 주식 자동매매 및 시장 분석 시스템의 총괄 관리 에이전트입니다.
     사용자의 입력을 읽고, 아래 기준에 따라 어떤 전문 에이전트에게 작업을 전달할지 결정하세요.
-
+    
     ---
     에이전트 분류 기준:
 
@@ -42,7 +42,10 @@ prompt = ChatPromptTemplate.from_template(
     5 **portfolio_agent**
        - 내 포트폴리오, 손익 요약, 리밸런싱, 비중조정 관련 질문
        - 예: "내 포트폴리오 수익률 알려줘", "이번 달 손익 요약", "내 잔고 알려줘"    
-   
+
+    6 **time_agent**
+       - 시간에 관련된 질문
+       - 예: "현재 시간 알려줘"     
     ---
     ⚙️ 출력 형식:
     반드시 아래 중 하나만 짧게 답변하세요.
@@ -51,13 +54,13 @@ prompt = ChatPromptTemplate.from_template(
     - 'rag'  (문서 기반 질의응답)
     - 'portfolio' (계좌 관련) 
     - 'technical'(보조지표 관련)
-    
+    - 'time'(시간)
     사용자의 입력:
     {input}
     """
 )
 
-def supervisor_agent(state: Dict[str, Any]) -> Command[Literal["stock_agent", "news_agent", "rag_agent", "technical_agent", "portfolio_agent"]]:
+def supervisor_agent(state: Dict[str, Any]) -> Command[Literal["stock_agent", "news_agent", "rag_agent", "technical_agent", "portfolio_agent", "time_agent"]]:
     msg = prompt.format_messages(input = state['input'])
     decision = llm.invoke(msg).content.strip().lower()
     
@@ -70,7 +73,9 @@ def supervisor_agent(state: Dict[str, Any]) -> Command[Literal["stock_agent", "n
     elif "technical" in decision:
         goto = "technical_agent"
     elif "rag" in decision:
-        goto = "rag_agent"        
+        goto = "rag_agent"
+    elif "time" in decision:
+        goto = "time_agent"                
     else:
         # fallback 기본값: portfolio_agent → rag_agent 보조 호출 가능
         goto = "portfolio_agent"

@@ -13,6 +13,7 @@ from llm.agents.human_review_agent import human_review_agent
 from llm.agents.rag_agent import rag_agent
 from llm.agents.portfolio_agent import portfolio_agent
 from llm.agents.technical_agent import technical_agent
+from llm.agents.time_agent import time_agent
 
 from llm.ingestion.local_index import build_or_update_index
 
@@ -48,6 +49,7 @@ async def lifespan(app: FastAPI):
     builder.add_node("technical_agent", technical_agent)
     builder.add_node("portfolio_agent", portfolio_agent)
     builder.add_node("rag_agent", rag_agent)
+    builder.add_node("time_agent", time_agent)
     builder.add_edge(START, "supervisor")
     builder.add_edge("human_review_agent", END)
     #redis_client = redis.Redis(host="127.0.0.1", port=6379, db=0)
