@@ -14,3 +14,4 @@ app/legacy/trading_logics.py
 dashboard_web/trading_logic.json
 venv/
 fsts_venv/
+.chromadb/
