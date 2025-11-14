@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime
 import pytz, re, feedparser, json, os
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 import pandas as pd
 import argparse
@@ -10,7 +10,8 @@ from app.utils.dynamodb.model.user_info_model import UserInfo
 from app.utils.dynamodb.model.stock_symbol_model import StockSymbol
 from app.utils.dynamodb.model.auto_trading_balance_model import AutoTradingBalance
 from app.utils.technical_indicator import TechnicalIndicator
-
+from llm.rag.rag_qdrant import run_rag_pipeline
+from app.utils.auto_trading_bot import AutoTradingBot
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, default=int(os.getenv("MCP_PORT", "8005")), help="Port number for MCP server")
 args = parser.parse_args()
@@ -18,132 +19,172 @@ args = parser.parse_args()
 mcp = FastMCP("stock-server", port=args.port)
 
 indicator = TechnicalIndicator()
-
+id = 'id1'
+auto_trading_bot = AutoTradingBot(id=id)
 @mcp.tool()
-async def get_current_time() -> str:
+def get_current_time() -> str:
     """Get current time in Asia/Seoul (YYYY-MM-DD HH:MM:SS)."""
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.now(kst)
     return now.strftime("%Y-%m-%d %H:%M:%S")
 
 @mcp.tool()
-async def get_stock_news_sentiment(stock_name: str, only_today: bool = True) -> str:
-    """뉴스 요약/감성(간단 데모)."""
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+def get_stock_news_sentiment(stock_name: str) -> str:
+    """
+    뉴스 제목과 원문만 가져오는 MCP 도구.
+    LLM 분석은 worker에서 수행한다.
+    """
     rss_url = f"https://news.google.com/rss/search?q={stock_name}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
+
     out = []
     for e in feed.entries[:5]:
         content = re.sub(r"<[^>]*>", "", e.summary or "")
-        prompt = f"제목: {e.title}\n내용: {content}\n요약과 감성(긍정/부정/중립)을 한 문단으로."
-        chain = llm | StrOutputParser()
-        summary = chain.invoke([("system", "금융 분석 전문가"), ("human", prompt)])
-        out.append({"title": e.title, "summary": summary})
-    return json.dumps(out, ensure_ascii=False, indent=2)
+        out.append({
+            "title": e.title,
+            "content": content
+        })
+
+    return json.dumps(out, ensure_ascii=False)
 
 @mcp.tool()
-async def get_user_info(user_id: str) -> str:
+def get_user_info(user_id: str) -> str:
     """
-    fsts-user-info DynamoDB 테이블에서 특정 사용자 정보를 조회합니다.
-    - user_id: UserInfo의 hash_key (id)
+    UserInfo에서 필요한 3개 필드만 조회해서 반환한다:
+    - buy_trading_logic (list[str])
+    - sell_trading_logic (list[str])
+    - trading_bot_name (str)
     """
     try:
         user = UserInfo.get(user_id)
-        data = {k: str(v) for k, v in user.attribute_values.items()}
-        return f"[UserInfo]\n{data}"
+
+        data = {
+            "buy_trading_logic": user.buy_trading_logic,
+            "sell_trading_logic": user.sell_trading_logic,
+            "trading_bot_name": user.trading_bot_name
+        }
+
+        return json.dumps(data, ensure_ascii=False)
+
     except UserInfo.DoesNotExist:
-        return f"❌ User '{user_id}' not found"
+        return json.dumps({"error": f"User '{user_id}' not found"}, ensure_ascii=False)
     except Exception as e:
-        return f"⚠️ Error fetching user info: {e}"
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
-async def get_stock_symbol(symbol: str) -> str:
+def get_stock_symbol(stock_name: str) -> str:
     """
-    fsts-stock-symbol 테이블에서 특정 종목(symbol)의 기본 정보를 조회합니다.
-    - symbol: 종목 코드 (e.g., '005930')
+    fsts-stock-symbol 테이블에서 종목 이름(stock_name)으로 기본 정보를 조회합니다.
+    - stock_name: 종목 이름 (e.g., '삼성전자')
     """
     try:
-        item = StockSymbol.get(symbol)
-        data = {k: str(v) for k, v in item.attribute_values.items()}
-        return f"[StockSymbol]\n{data}"
-    except StockSymbol.DoesNotExist:
-        return f"❌ Symbol '{symbol}' not found"
+        # 이름으로 scan
+        items = StockSymbol.scan(StockSymbol.symbol_name == stock_name)
+
+        result = []
+        for item in items:
+            result.append({k: str(v) for k, v in item.attribute_values.items()})
+
+        if not result:
+            return json.dumps({"error": f"Symbol name '{stock_name}' not found"}, ensure_ascii=False)
+
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
     except Exception as e:
-        return f"⚠️ Error fetching stock symbol: {e}"
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
-async def get_auto_trading_balance(trading_bot_name: str, symbol: str) -> str:
+def get_auto_trading_balance(trading_bot_name: str) -> str:
     """
-    fsts-auto-trading-balance 테이블에서 특정 봇 + 종목 잔고 정보를 조회합니다.
-    - trading_bot_name: 트레이딩 봇 이름 (hash key)
-    - symbol: 종목 코드 (range key)
+    Trading Bot 이름으로 전체 잔고 목록을 조회한다.
     """
     try:
-        balance = AutoTradingBalance.get(trading_bot_name, symbol)
-        data = {k: str(v) for k, v in balance.attribute_values.items()}
-        return f"[AutoTradingBalance]\n{data}"
-    except AutoTradingBalance.DoesNotExist:
-        return f"❌ No balance found for bot={trading_bot_name}, symbol={symbol}"
+        balances = AutoTradingBalance.query(trading_bot_name)
+
+        result = []
+        for item in balances:
+            result.append(item.attribute_values)
+
+        if not result:
+            return json.dumps({"error": f"No balance found for bot '{trading_bot_name}'"}, ensure_ascii=False)
+
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
     except Exception as e:
-        return f"⚠️ Error fetching trading balance: {e}"
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
     
 @mcp.tool()
-def get_indicator(indicator_type: str, data: list, period: int | None = None) -> str:
+def get_indicator(stock_name: str, indicator_type: str, start_date: str, end_date: str) -> str:
     """
-    📊 OHLC 데이터에 대해 지정된 보조지표를 계산하여 반환합니다.
-    - indicator_type: 보조지표 이름 (rsi, macd, mfi, bollinger, stochastic, ema, sma, wma)
-    - data: OHLC 딕셔너리 리스트 (예: [{"Open":..., "High":..., "Low":..., "Close":..., "Volume":...}, ...])
-    - period: 일부 지표의 계산 기간 (선택)
+    종목 이름 + 기간을 입력받아 OHLC와 모든 보조지표를 계산한 후
+    원하는 indicator만 반환하는 MCP Tool.
     """
     try:
-        df = pd.DataFrame(data)
+        # 1️⃣ 종목명 → 종목코드(symbol) 변환
+        items = StockSymbol.scan(StockSymbol.symbol_name == stock_name)
+        codes = [item.symbol for item in items]
 
-        if "Close" not in df.columns:
-            return "❌ 데이터에 'Close' 컬럼이 필요합니다."
+        if not codes:
+            return json.dumps({"error": f"Symbol name '{stock_name}' not found"}, ensure_ascii=False)
 
-        if indicator_type == "rsi":
-            df = indicator.cal_rsi_df(df, period or 25)
-            result = df[["Close", "rsi"]].dropna().tail(5).to_dict(orient="records")
+        symbol = codes[0]
 
-        elif indicator_type == "macd":
-            df = indicator.cal_macd_df(df)
-            result = df[["Close", "macd", "macd_signal", "macd_histogram"]].dropna().tail(5).to_dict(orient="records")
+        # 2️⃣ 네 기존 내부 함수 사용
+        # _get_ohlc(symbol, start_date, end_date, interval, mode)
+        ohlc_data = auto_trading_bot._get_ohlc(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
-        elif indicator_type == "mfi":
-            df = indicator.cal_mfi_df(df)
-            result = df[["Close", "mfi"]].dropna().tail(5).to_dict(orient="records")
+        # 3️⃣ 모든 indicator가 계산된 df 생성
+        df = auto_trading_bot._create_ohlc_df(
+            ohlc_data=ohlc_data,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
-        elif indicator_type == "bollinger":
-            df = indicator.cal_bollinger_band(df, window=period or 20)
-            result = df[["Close", "BB_Upper", "BB_Middle", "BB_Lower"]].dropna().tail(5).to_dict(orient="records")
+        # 4️⃣ 사용자가 요청한 indicator만 추출
+        available = df.columns.tolist()
 
-        elif indicator_type == "stochastic":
-            df = indicator.cal_stochastic_df(df)
-            result = df[["Close", "stochastic_k", "stochastic_d"]].dropna().tail(5).to_dict(orient="records")
+        mapping = {
+            "rsi": ["Close", "rsi"],
+            "macd": ["Close", "macd", "macd_signal", "macd_histogram"],
+            "mfi": ["Close", "mfi"],
+            "bollinger": ["Close", "BB_Upper", "BB_Middle", "BB_Lower"],
+            "stochastic": ["Close", "stochastic_k", "stochastic_d"],
+            "ema": [col for col in available if col.startswith("EMA_")],
+            "sma": [col for col in available if col.startswith("SMA_")],
+            "wma": [col for col in available if col.startswith("WMA_")],
+        }
 
-        elif indicator_type == "ema":
-            df = indicator.cal_ema_df(df, period or 20)
-            col = f"EMA_{period or 20}"
-            result = df[["Close", col]].dropna().tail(5).to_dict(orient="records")
+        if indicator_type not in mapping:
+            return json.dumps({"error": f"Unsupported indicator type: {indicator_type}"}, ensure_ascii=False)
 
-        elif indicator_type == "sma":
-            df = indicator.cal_sma_df(df, period or 20)
-            col = f"SMA_{period or 20}"
-            result = df[["Close", col]].dropna().tail(5).to_dict(orient="records")
+        cols = mapping[indicator_type]
+        cols = [c for c in cols if c in available]  # 실제 존재하는 컬럼만 선택
 
-        elif indicator_type == "wma":
-            df = indicator.cal_wma_df(df, period or 20)
-            col = f"WMA_{period or 20}"
-            result = df[["Close", col]].dropna().tail(5).to_dict(orient="records")
+        # 최근 5개만 반환
+        result = df[cols].dropna().tail(5).to_dict(orient="records")
 
-        else:
-            return f"⚠️ 지원되지 않는 지표 유형입니다: {indicator_type}"
-
-        return f"[{indicator_type.upper()} 결과]\n{result}"
+        return json.dumps({
+            "symbol": symbol,
+            "stock_name": stock_name,
+            "indicator": indicator_type,
+            "start_date": start_date,
+            "end_date": end_date,
+            "result": result
+        }, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        return f"⚠️ 보조지표 계산 중 오류 발생: {e}"
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
 
+
+@mcp.tool()
+def rag_search(query: str) -> str:
+    return run_rag_pipeline(query)
     
 if __name__ == "__main__":
     print("🚀 Starting MCP server at :8005 (SSE)")
