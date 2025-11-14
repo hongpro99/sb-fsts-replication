@@ -1,158 +1,181 @@
-# server/api.py
+# api.py
 from fastapi import FastAPI
-from contextlib import asynccontextmanager
 from pydantic import BaseModel
-import redis
-from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.redis import RedisSaver
 from langgraph.types import Command
+from langgraph.checkpoint.redis import RedisSaver
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_openai import AzureChatOpenAI
+import asyncio
+from langgraph.prebuilt import ToolNode
+from langchain_mcp_adapters.client import MultiServerMCPClient
+# 🔹 Supervisor/Workers 그래프 빌더
+from llm.supervisor.supervisor_workers import build_supervisor
+import os 
+from dotenv import load_dotenv
 
-from llm.agents.supervisor_agent import supervisor_agent
-from llm.agents.stock_agent import stock_agent
-from llm.agents.news_agent import news_agent
-from llm.agents.human_review_agent import human_review_agent
-from llm.agents.rag_agent import rag_agent
-from llm.agents.portfolio_agent import portfolio_agent
-from llm.agents.technical_agent import technical_agent
-from llm.agents.time_agent import time_agent
+load_dotenv()
 
-from llm.ingestion.local_index import build_or_update_index
+app = FastAPI(title="Stock AI (Supervisor/Workers) API")
 
-# -----------------------------
-# AppState 정의
-# -----------------------------
-from typing import TypedDict, Literal
+redis_saver = RedisSaver.from_conn_string("redis://127.0.0.1:6379/0")
 
-class AppState(TypedDict, total=False):
-    input: str
-    task: str
-    response: str #현재 출력 메시지
-    handled_by: str #어떤 agent가 응답을 처리했는지
-    human_feedback: str
-    require_human: bool
+# 전역 Supervisor 그래프 인스턴스
+supervisor_graph = None
 
-# -----------------------------
-# FastAPI 초기화
-# -----------------------------
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    
-    print("🚀 서버 시작 중... 로컬 데이터 인덱싱 준비")
-    # 로컬 폴더 인덱싱
-    build_or_update_index(data_dirs=["./data/docs"])
-    
-    builder = StateGraph(AppState)
-    builder.add_node("supervisor", supervisor_agent)
-    builder.add_node("stock_agent", stock_agent)
-    builder.add_node("news_agent", news_agent)
-    builder.add_node("human_review_agent", human_review_agent)
-    builder.add_node("technical_agent", technical_agent)
-    builder.add_node("portfolio_agent", portfolio_agent)
-    builder.add_node("rag_agent", rag_agent)
-    builder.add_node("time_agent", time_agent)
-    
-    builder.add_edge(START, "supervisor")
-    builder.add_edge("human_review_agent", END)
-    #redis_client = redis.Redis(host="127.0.0.1", port=6379, db=0)
-    # saver = RedisSaver.from_conn_string("redis://127.0.0.1:6379/0")
-    # app.state.graph = builder.compile(checkpointer=saver)
-    app.state.graph = builder.compile()
-
-    yield
-
-app = FastAPI(title="Stock AI Graph (lifespan)", lifespan=lifespan)
-# -----------------------------
-# 요청 모델
-# -----------------------------
+# ==========================================================
+# 🧩 요청 데이터 모델 정의
+# ==========================================================
 class ChatRequest(BaseModel):
-    session_id: str #LangGraph 세션 ID (thread_id와 동일)
-    text: str #
-    require_human: bool = False #human 검토가 필요한지
+    session_id: str
+    text: str
 
 class ResumeRequest(BaseModel):
     session_id: str
-    human_feedback: str #사용자가 이전에 입력한 피드백
+    human_feedback: str
 
-# -----------------------------
-# 1️⃣ /agent_chat — 그래프 시작
-# -----------------------------
+
+# ==========================================
+# FastAPI Startup 이벤트
+# ==========================================
+@app.on_event("startup")
+async def startup_event():
+    """
+    MCP 서버 초기화 및 Supervisor 그래프 생성
+    """
+    global supervisor_graph
+
+    print("🚀 MCP 서버 초기화 중...")
+
+    # 여러 MCP 서버 등록
+    client = MultiServerMCPClient(
+        {
+            "stock-server": {
+                "url": "http://localhost:8005/sse",
+                "transport": "sse",
+                "timeout": 10.0,
+                "sse_read_timeout": 300.0,
+            },
+            "tavily-mcp": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "tavily-mcp@0.1.4"],
+                "env": {"TAVILY_API_KEY": os.getenv("TAVILY_API_KEY")},
+            },
+        }
+    )
+
+    # ✅ 모든 MCP 서버의 툴을 한 번에 로드
+    tools = await client.get_tools()
+    #['get_current_time', 'get_stock_news_sentiment', 'get_user_info', 'get_stock_symbol', 'get_auto_trading_balance', 'get_indicator', 'tavily-search', 'tavily-extract']
+    print(f"✅ MCP Tools 로딩 완료: {[t.name for t in tools]}") 
+
+    # ✅ ToolNode로 변환 (LangGraph에서 공용 허브로 사용)
+    # tool_hub  = ToolNode(tools)
+
+    # ✅ LangGraph LLM / Checkpointer 설정
+    llm = AzureChatOpenAI(
+        azure_deployment="gpt-4o-mini",
+        azure_endpoint="https://sb-azure-openai-studio.openai.azure.com/",
+        api_version="2024-10-21",
+        temperature=0,
+    )
+
+    # ✅ Supervisor 그래프 빌드
+    supervisor_graph = build_supervisor(llm=llm, tools=tools, checkpointer=InMemorySaver())
+    print("✅ Supervisor/Workers 그래프 준비 완료")
+
+
+# ==========================================================
+# 💬 /agent_chat — 메인 챗 엔드포인트
+# ==========================================================
 @app.post("/agent_chat")
-def agent_chat(req: ChatRequest):
-    print("\n🔄 /agent_chat 호출됨")
-    print(f"📨 요청: session_id={req.session_id}, input: {req.text}, require_human: {req.require_human}")
-    
-    init_state = {"input": req.text, "require_human": req.require_human}
+async def agent_chat(req: ChatRequest):
+    """
+    사용자의 입력을 Supervisor 그래프에 전달하여 적절한 Worker를 호출.
+    """
+    assert supervisor_graph is not None, "Supervisor graph is not initialized"
+
+    print(f"📨 입력: {req.text} (session={req.session_id})")
+
     config = {"configurable": {"thread_id": req.session_id}}
-    result = app.state.graph.invoke(init_state, config=config)
-    print(f"📦 LangGraph result: {result}")
-    
-    # interrupt 발생 시 메시지 포함 응답
-    if "__interrupt__" in result:
-        interrupt_list = result["__interrupt__"]
-        interrupt_msg = None
-        if isinstance(interrupt_list, list) and len(interrupt_list) > 0:
-            # Interrupt 객체의 value 속성 추출
-            interrupt_obj = interrupt_list[0]
-            interrupt_msg = getattr(interrupt_obj, "value", str(interrupt_obj))
+    payload = {"messages": [{"role": "user", "content": req.text}]}
+
+    # Supervisor 실행
+    result = await supervisor_graph.ainvoke(payload, config)
+    print(f"result: {result}")
+    # Human-in-the-loop interrupt 처리
+    interrupts = result.get("__interrupt__", [])
+    print(f"interrupts: {interrupts}")
+    if interrupts:
+        msg = getattr(interrupts[0], "value", str(interrupts[0]))
+        print(f"msg: {msg}")
         return {
             "session_id": req.session_id,
-            "handled_by": result.get("handled_by", "supervisor_agent"),
-            "response": interrupt_msg or "⚠️ 인간 피드백이 필요합니다.", #interrupt가 value를 키워드로 가짐
-            "require_human": True,
-            "human_feedback": None
+            "response": msg,
+            "require_human": True
         }
 
-    # 일반적인 경우
-    return {
-        "session_id": req.session_id,
-        "handled_by": result.get("handled_by"),
-        "response": result.get("response"),
-        "require_human": req.require_human,
-        "human_feedback": result.get("human_feedback")
-    }
+    # ✅ 안전하게 content 추출
+    response_text = (
+        getattr(result, "response", None)
+        or (
+            result["messages"][-1].content
+            if "messages" in result and result["messages"]
+            else ""
+        )
+    )
 
-# -----------------------------
-# 2️⃣ /resume — Human Feedback 이어가기
-# -----------------------------
+    return {"session_id": req.session_id, "response": response_text}
+
+
+# ==========================================================
+# 🔁 /resume — Human Feedback 반영 후 재개
+# ==========================================================
 @app.post("/resume")
-def resume(req: ResumeRequest):
-    print("\n🔄 /resume 호출됨")
-    print(f"📨 요청: session_id={req.session_id}, feedback={req.human_feedback!r}")
+async def resume(req: ResumeRequest):
+    """
+    LangGraph interrupt 이후 사람 피드백을 Supervisor로 전달하여 실행 재개.
+    """
+    assert supervisor_graph is not None, "Supervisor graph is not initialized"
+
+    print(f"🔁 human_feedback: {req.human_feedback} (session={req.session_id})")
+
     config = {"configurable": {"thread_id": req.session_id}}
     
-    try:
-        # ✅ 공식문서 방식: Command(resume=True)
-        result = app.state.graph.invoke(Command(resume=True), config=config)
-        print(f"📦 resume 결과: {result}")
+    '''LangGraph는 내부적으로:
+    Checkpoint(thread_id=abc123)를 불러옵니다.
+    직전 중단지점(ToolNode 실행 전)에서 상태를 복원합니다.
+    사람 피드백(human_feedback)을 state에 주입합니다.
+    ReAct 루프를 다시 진행시킵니다.
+    '''
+    
+    # UI에서 온 문자열("approve", "reject", "edit")을
+    # LangChain이 기대하는 decisions 포맷으로 변환
+    decision_type = req.human_feedback
+    decisions = [{"type": decision_type}]
 
-        # resume 후에도 interrupt 발생 가능 (예: human_review_agent)
-        if "__interrupt__" in result:
-            interrupt_list = result["__interrupt__"]
-            interrupt_msg = None
-            if isinstance(interrupt_list, list) and interrupt_list:
-                interrupt_obj = interrupt_list[0]
-                interrupt_msg = getattr(interrupt_obj, "value", str(interrupt_obj))
+    result = await supervisor_graph.ainvoke(
+        Command(resume={"decisions": decisions}),
+        config=config
+    )
 
-            print(f"⏸ resume 중 interrupt 발생 → {interrupt_msg}")
-            return {
-                "session_id": req.session_id,
-                "handled_by": result.get("handled_by", "unknown"),
-                "response": interrupt_msg or "⚠️ 인간 피드백이 필요합니다.",
-                "require_human": True,
-                "human_feedback": req.human_feedback
-            }
+    # ✅ 안전하게 content 추출
+    response_text = (
+        getattr(result, "response", None)
+        or (
+            result["messages"][-1].content
+            if "messages" in result and result["messages"]
+            else ""
+        )
+    )
 
-        print("✅ resume 정상 완료")
-        return {
-            "session_id": req.session_id,
-            "response": result.get("response"),
-            "human_feedback": result.get("human_feedback"),
-            "handled_by": result.get("handled_by")
-        }
+    return {"session_id": req.session_id, "response": response_text}
 
-    except Exception as e:
-        import traceback
-        print("❌ resume 실행 중 예외 발생!")
-        traceback.print_exc()
-        return {"session_id": req.session_id, "error": str(e)}
+
+# ==========================================================
+# 🧭 Health Check
+# ==========================================================
+@app.get("/")
+def root():
+    return {"message": "✅ Stock AI (Supervisor/Workers) API is running"}
