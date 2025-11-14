@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  rag:
+    image: python:3.10
+    container_name: rag_qdrant
+    working_dir: /app
+    volumes:
+      - ./llm/rag/rag_qdrant.py:/app/llm/rag/rag_qdrant.py
+      - ./docs:/app/docs                # 📂 문서 폴더 마운트
+      - ./requirements.txt:/app/requirements.txt
+    depends_on:
+      - qdrant
+    command: >
+      bash -c "
+        pip install --no-cache-dir -r requirements.txt &&
+        python llm/rag/rag_qdrant.py
+      "
