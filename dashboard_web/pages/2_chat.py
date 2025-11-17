@@ -73,9 +73,44 @@ show_messages()
 # --------------------------------------------------------------
 # 🔥 인터럽트 UI - 변경 후
 # --------------------------------------------------------------
+# if st.session_state.pending_interrupt:
+#     st.warning("🛑 에이전트가 사람의 승인을 기다리고 있습니다.")
+
+#     interrupt_msg = st.session_state.interrupt_message
+#     st.info(interrupt_msg)
+
+#     st.write("### 작업을 어떻게 할까요?")
+
+#     col1, col2, col3 = st.columns(3)
+
+#     # 승인
+#     if col1.button("✔ 승인"):
+#         st.session_state.pending_interrupt = False
+#         result = send_resume("approve")
+#         ai_msg = result["response"]
+#         st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+#         st.rerun()
+
+#     # 거절
+#     if col2.button("❌ 거절"):
+#         st.session_state.pending_interrupt = False
+#         result = send_resume("reject")
+#         ai_msg = result["response"]
+#         st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+#         st.rerun()
+
+#     # 편집
+#     if col3.button("✏ 편집"):
+#         st.session_state.pending_interrupt = False
+#         result = send_resume("edit")
+#         ai_msg = result["response"]
+#         st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+#         st.rerun()
+
+#     st.stop()
+
 if st.session_state.pending_interrupt:
     st.warning("🛑 에이전트가 사람의 승인을 기다리고 있습니다.")
-
     interrupt_msg = st.session_state.interrupt_message
     st.info(interrupt_msg)
 
@@ -83,33 +118,38 @@ if st.session_state.pending_interrupt:
 
     col1, col2, col3 = st.columns(3)
 
-    # 승인
+    def handle_decision(decision):
+        result = send_resume(decision)
+
+        # 🔥 resume 이후에도 또 interrupt가 있을 수 있음!
+        if result.get("require_human"):
+            # 다음 interrupt 재등록
+            st.session_state.pending_interrupt = True
+            st.session_state.interrupt_message = result["response"]
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": result["response"],
+            })
+            st.rerun()
+            st.stop()
+        else:
+            # 정상 응답
+            st.session_state.pending_interrupt = False
+            ai_msg = result.get("response", "")
+            st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+            st.rerun()
+            st.stop()
+
     if col1.button("✔ 승인"):
-        st.session_state.pending_interrupt = False
-        result = send_resume("approve")
-        ai_msg = result["response"]
-        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
-        st.rerun()
+        handle_decision("approve")
 
-    # 거절
     if col2.button("❌ 거절"):
-        st.session_state.pending_interrupt = False
-        result = send_resume("reject")
-        ai_msg = result["response"]
-        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
-        st.rerun()
+        handle_decision("reject")
 
-    # 편집
     if col3.button("✏ 편집"):
-        st.session_state.pending_interrupt = False
-        result = send_resume("edit")
-        ai_msg = result["response"]
-        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
-        st.rerun()
+        handle_decision("edit")
 
     st.stop()
-
-
 # --------------------------------------------------------------
 # 일반 입력 UI
 # --------------------------------------------------------------
