@@ -25,9 +25,15 @@ prompt = """
 """
 
 def make_stock_info_worker(llm, tools):
+    print("[DEBUG] make_stock_info_worker called")
+
+    # ⚠️ tools를 강제로 get_current_time 하나만 받도록 설정
+    filtered_tools = [t for t in tools if t.name == "get_stock_symbol"]
+
+    print(f"[DEBUG] Filtered tools (only get_stock_symbol): {filtered_tools}")
     agent = create_agent(
         model=llm,
-        tools=tools,  # [get_stock_symbol]
+        tools=filtered_tools,  # [get_stock_symbol]
         system_prompt=prompt,
         name="stock_info_worker",
 

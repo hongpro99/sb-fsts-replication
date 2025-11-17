@@ -21,9 +21,16 @@ def make_news_worker(llm, tools):
     LangChain create_agent 기반 뉴스 Worker.
     MCP tool 호출 전에 반드시 HITL 승인을 거친다.
     """
+    print("[DEBUG] make_news_worker called")
+
+    # ⚠️ tools를 강제로 get_current_time 하나만 받도록 설정
+    filtered_tools = [t for t in tools if t.name == "get_stock_news_sentiment"]
+
+    print(f"[DEBUG] Filtered tools (only get_stock_news_sentiment): {filtered_tools}")
+    
     agent = create_agent(
         model=llm,
-        tools=tools,                     # MCP tools (get_stock_news_sentiment)
+        tools=filtered_tools,                     # MCP tools (get_stock_news_sentiment)
         system_prompt=prompt,
         name="news_worker",
         middleware=[

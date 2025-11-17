@@ -28,9 +28,18 @@ prompt = """
    """
    
 def make_user_info_worker(llm, tools):
+    print("[DEBUG] make_user_info_worker called")
+
+    # 허용할 tool 이름 목록
+    allowed_tool = {"get_user_info", "get_auto_trading_balance"}
+    
+    # ⚠️ tools를 강제로 get_current_time 하나만 받도록 설정
+    filtered_tools = [t for t in tools if t.name in allowed_tool]
+
+    print(f"[DEBUG] Filtered tools (get_user_info): {filtered_tools}")
     agent = create_agent(
         model=llm,
-        tools=tools,   # [get_user_info, get_auto_trading_balance]
+        tools=filtered_tools,   # [get_user_info, get_auto_trading_balance]
         system_prompt=prompt,
         name="user_info_worker",
 

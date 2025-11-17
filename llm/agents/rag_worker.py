@@ -36,9 +36,15 @@ Tool 실행 후에는 RAG 파이프라인이 반환한 '문맥(context)'을 기�
   {final_answer}는 문맥을 근거로 한 네가 생성하는 최종 답변이다.
 """
 def make_rag_worker(llm, tools):
+    print("[DEBUG] make_rag_worker called")
+
+    # ⚠️ tools를 강제로 get_current_time 하나만 받도록 설정
+    filtered_tools = [t for t in tools if t.name == "rag_search"]
+
+    print(f"[DEBUG] Filtered tools (only rag_search): {filtered_tools}")
     agent = create_agent(
         model=llm,
-        tools=tools,                         # [rag_search]
+        tools=filtered_tools,                         # [rag_search]
         system_prompt=prompt,
         name="rag_worker",
         middleware=[
